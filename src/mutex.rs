@@ -3,7 +3,7 @@ use std::{
     ops::{Deref, DerefMut},
     sync::Arc,
 };
-use tokio::{sync::Notify, time::Instant};
+use tokio::sync::Notify;
 
 pub struct MutexGuard<'a, T> {
     data: &'a Mutex<T>,
@@ -37,6 +37,7 @@ impl<'a, T> DerefMut for MutexGuard<'a, T> {
     }
 }
 
+#[derive(Debug)]
 pub struct Mutex<T> {
     data: UnsafeCell<T>,
     await_access: Arc<Notify>,
@@ -56,12 +57,7 @@ impl<T> Mutex<T> {
 
     #[inline]
     pub async fn lock(&self) -> MutexGuard<T> {
-        let instant: Instant = Instant::now();
         self.await_access.notified().await;
-        let time_taken = instant.elapsed().as_millis();
-        if time_taken > 0 {
-            println!("{time_taken}");
-        }
         MutexGuard::new(self, self.await_access.to_owned())
     }
 }
