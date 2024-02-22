@@ -81,24 +81,28 @@ impl<'a, T: Send + Sync> Deref for ReadGuard<'a, T> {
 #[derive(Debug)]
 enum Current {
     None,
-    Read(Arc<Notify>),
-    Write(Arc<Notify>),
+    Read(u64),
+    Write(u64),
 }
 
 #[derive(Debug)]
 struct LockGroup {
     is_writer: bool,
-    notify: Arc<Notify>,
+    count: u64,
 }
 
 impl LockGroup {
-    pub fn new(is_writer: bool, notify: Arc<Notify>) -> Self {
-        Self { is_writer, notify }
+    pub fn new(is_writer: bool) -> Self {
+        Self {
+            is_writer,
+            count: 1u64,
+        }
     }
 }
 
 #[derive(Debug)]
 pub struct RwLockRuntimeData {
+    notify: Arc<Notify>,
     current: Arc<Mutex<Current>>,
     queue: Arc<Mutex<VecDeque<LockGroup>>>,
     async_drop_tx: UnboundedSender<()>,
@@ -108,6 +112,7 @@ pub struct RwLockRuntimeData {
 impl RwLockRuntimeData {
     pub fn new(async_drop_tx: UnboundedSender<()>, stop_tx: Sender<()>) -> Self {
         Self {
+            notify: Arc::new(Notify::new()),
             current: Arc::new(Mutex::new(Current::None)),
             queue: Arc::new(Mutex::new(VecDeque::new())),
             async_drop_tx,
@@ -116,15 +121,17 @@ impl RwLockRuntimeData {
     }
     async fn tick(&self) {
         let mut mutex_guard = self.current.lock().await;
-        match mutex_guard.deref() {
-            Current::Write(notify) => {
-                if Arc::strong_count(&notify) != 1 {
-                    notify.notify_one();
+        match mutex_guard.deref_mut() {
+            Current::Write(current) => {
+                *current -= 1u64;
+                if *current != 0u64 {
+                    self.notify.notify_one();
                     return;
                 }
             }
-            Current::Read(notify) => {
-                if Arc::strong_count(&notify) != 1 {
+            Current::Read(current) => {
+                *current -= 1u64;
+                if *current != 0u64 {
                     return;
                 }
             }
@@ -132,11 +139,13 @@ impl RwLockRuntimeData {
         }
         if let Some(lock_group) = self.queue.lock().await.pop_front() {
             *mutex_guard.deref_mut() = if lock_group.is_writer {
-                lock_group.notify.notify_one();
-                Current::Write(lock_group.notify)
+                self.notify.notify_one();
+                Current::Write(lock_group.count)
             } else {
-                lock_group.notify.notify_waiters();
-                Current::Read(lock_group.notify)
+                for _ in 0..lock_group.count {
+                    self.notify.notify_one();
+                }
+                Current::Read(lock_group.count)
             }
         } else {
             *mutex_guard.deref_mut() = Current::None;
@@ -193,16 +202,14 @@ impl<T: Send + Sync> RwLock<T> {
         Self { inner }
     }
 
-    async fn join_queue(&self, is_writer: bool) -> Arc<Notify> {
+    async fn join_queue(&self, is_writer: bool) {
         let mut mutex_guard = self.inner.runtime_data.queue.lock().await;
-        if let Some(lock_group) = mutex_guard.iter().last() {
+        if let Some(lock_group) = mutex_guard.iter_mut().last() {
             if is_writer == lock_group.is_writer {
-                return lock_group.notify.clone();
+                lock_group.count += 1;
             }
         }
-        let notify = Arc::new(Notify::new());
-        mutex_guard.push_back(LockGroup::new(is_writer, notify.clone()));
-        notify
+        mutex_guard.push_back(LockGroup::new(is_writer));
     }
 
     #[inline]
@@ -210,14 +217,13 @@ impl<T: Send + Sync> RwLock<T> {
         let mut mutex_guard = self.inner.runtime_data.current.lock().await;
         let none = matches!(mutex_guard.deref(), Current::None);
         if none {
-            let notify: Arc<Notify> = Arc::new(Notify::new());
-            *mutex_guard = Current::Write(notify.to_owned());
+            *mutex_guard = Current::Write(1);
             drop(mutex_guard);
-            notify.notified().await;
         } else {
+            let notify_permit = self.inner.runtime_data.notify.notified();
+            self.join_queue(true).await;
             drop(mutex_guard);
-            let t = self.join_queue(true).await;
-            t.notified().await;
+            notify_permit.await;
         }
         WriteGuard::new(self, self.inner.clone())
     }
@@ -227,13 +233,13 @@ impl<T: Send + Sync> RwLock<T> {
         let mut mutex_guard = self.inner.runtime_data.current.lock().await;
         let none = matches!(mutex_guard.deref(), Current::None);
         if none {
-            let notify: Arc<Notify> = Arc::new(Notify::new());
-            *mutex_guard = Current::Read(notify.to_owned());
+            *mutex_guard = Current::Read(1);
             drop(mutex_guard);
         } else {
+            let notify_permit = self.inner.runtime_data.notify.notified();
+            self.join_queue(false).await;
             drop(mutex_guard);
-            let t = self.join_queue(false).await;
-            t.notified().await;
+            notify_permit.await;
         }
         ReadGuard::new(self, self.inner.clone())
     }
