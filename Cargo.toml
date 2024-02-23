@@ -1,9 +1,19 @@
 [package]
 name = "async_lock"
 version = "0.1.0"
+authors = ["Alexi Peck <alexinicolaspeck@gmail.com>"]
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[features]
+default = []
+dev = []
+
+[lib]
+name = "async_lock"
+path = "src/lib.rs"
 
 [dependencies]
+tokio = {version = "1.36.0", features = ["macros", "rt", "sync"]}
+
+[dev-dependencies]
 tokio = {version = "1.36.0", features = ["full"]}
