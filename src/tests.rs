@@ -5,7 +5,7 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::{join, sync::Notify, task::JoinHandle};
 
@@ -250,11 +250,35 @@ pub async fn tokio_rwlock() {
     assert_eq!(*locked_data.read().await, BTreeSet::new());
 }
 
+async fn benchmark<F, Fut>(async_fn: F, iterations: usize)
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let mut times: Vec<Duration> = Vec::with_capacity(iterations);
+
+    for _ in 0..iterations {
+        let start = Instant::now();
+        async_fn().await;
+        let duration = start.elapsed();
+        times.push(duration);
+    }
+
+    let total_time: Duration = times.iter().sum();
+    let min_time = *times.iter().min().unwrap();
+    let max_time = *times.iter().max().unwrap();
+    let avg_time = total_time / iterations as u32;
+    println!();
+    println!("Min time: {:?}", min_time);
+    println!("Max time: {:?}", max_time);
+    println!("Avg time: {:?}", avg_time);
+}
+
 #[cfg(test)]
 pub mod tests {
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
-    use crate::tests::{my_mutex, my_rwlock, my_rwlock_v2, tokio_mutex, tokio_rwlock};
+    use crate::tests::{benchmark, my_mutex, my_rwlock, my_rwlock_v2, tokio_mutex, tokio_rwlock};
 
     #[tokio::test]
     pub async fn test_tokio_mutex() {
@@ -301,28 +325,31 @@ pub mod tests {
 
     #[tokio::test]
     pub async fn test_benchmark_tokio_rwlock() {
-        let instant: Instant = Instant::now();
+        benchmark(tokio_rwlock, 100).await;
+        /* let instant: Instant = Instant::now();
         for _ in 0..100 {
             tokio_rwlock().await;
         }
-        println!("100 runs took {}ms", instant.elapsed().as_millis());
+        println!("100 runs took {}ms", instant.elapsed().as_millis()); */
     }
 
     #[tokio::test]
     pub async fn test_benchmark_my_rwlock() {
-        let instant: Instant = Instant::now();
+        benchmark(my_rwlock, 100).await;
+        /* let instant: Instant = Instant::now();
         for _ in 0..100 {
             my_rwlock().await;
         }
-        println!("100 runs took {}ms", instant.elapsed().as_millis());
+        println!("100 runs took {}ms", instant.elapsed().as_millis()); */
     }
 
     #[tokio::test]
     pub async fn test_benchmark_my_rwlock_v2() {
-        let instant: Instant = Instant::now();
+        benchmark(my_rwlock_v2, 100).await;
+        /* let instant: Instant = Instant::now();
         for _ in 0..100 {
             my_rwlock_v2().await;
         }
-        println!("100 runs took {}ms", instant.elapsed().as_millis());
+        println!("100 runs took {}ms", instant.elapsed().as_millis()); */
     }
 }
